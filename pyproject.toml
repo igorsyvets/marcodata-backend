@@ -1,0 +1,11 @@
+marcodata-backend/
+├── src/
+│   ├── api/
+│   │   ├── __init__.py
+│   │   ├── endpoints.py
+│   │   └── models.py
+│   └── main.py
+├── tests/
+│   └── test_endpoints.py
+├── requirements.txt
+└── README.md
