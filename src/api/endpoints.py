@@ -459,6 +459,9 @@ def generate_topic_names(clusters: Dict[str, Dict[str, List[str]]], max_words: i
         combined_text = " ".join(cluster['texts'][:10])
         request_payload.append({"topic_id": str(topic_id), "combined_text": combined_text})
     
+
+    print(f"\n\nRequest payload: {request_payload}\n")
+
     # Send request to Mistral
     response = sent_mistral_prompt(f"""
         You receive an array of objects. Each object contains a topic_id and a combined_text.
@@ -467,10 +470,10 @@ def generate_topic_names(clusters: Dict[str, Dict[str, List[str]]], max_words: i
         1. The name should be descriptive and concise.
         2. The name should be 3-5 words long.
         3. The name should be relevant to the combined_text.
-        4. When choosing summary words, consider the most frequent and important terms such as
-           brand names, unique words, person names, or geographical locations.
-        5. Try your best to identify one key term that represents the topic
-        6. Words should have logical order
+        4. When choosing summary words, consider the most frequent terms in the respective combined_text
+        5. Prefer high-signal words to generic words
+        6. Try your best to identify one key term that represents the topic
+        7. Words should have logical order. Use commas as needed
         Here is the request payload:
         <request_payload>
         {request_payload}
@@ -648,7 +651,8 @@ async def analyze_posts(request: PostsRequest):
                     # Move to global 'other' topic
                     merged_clusters["other"]['texts'].extend(cluster['texts'])
                     merged_clusters['other']['ids'].extend(cluster['ids'])
-                    merged_clusters['other']['display_name'] = "Other"  # Simple name for other cluster
+                    if 'display_name' not in merged_clusters['other']:
+                        merged_clusters['other']['display_name'] = "Other"  # Simple name for other cluster
                 else:
                     merged_clusters[label] = cluster
 
@@ -659,15 +663,15 @@ async def analyze_posts(request: PostsRequest):
 
     # Assign topic names to clusters
     for canonical_key, cluster in merged_clusters.items():
-        if canonical_key in topic_names:
+        if canonical_key in topic_names and canonical_key != 'other':
             cluster['display_name'] = topic_names[canonical_key]
 
     # Generate response
     response = [
         TopicResponse(
             name=cluster.get('display_name', '') or topic_names.get(str(canonical_key), str(canonical_key)),  # Ensure canonical_key is a string
-            id=f"topic_{i+1}",
-            postIds=cluster['ids'],
+            id=cluster.get('id', str(canonical_key)),  # Ensure canonical_key is a string
+            postIds=cluster['ids'],  # Ensure original ids are used
             canonical_key=str(canonical_key)  # Ensure canonical_key is a string
         )
         for i, (canonical_key, cluster) in enumerate(merged_clusters.items())
