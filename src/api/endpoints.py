@@ -3,6 +3,9 @@ from pydantic import BaseModel, field_validator
 from sentence_transformers import SentenceTransformer
 from sklearn.cluster import KMeans
 from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
+from sklearn.decomposition import TruncatedSVD
+from sklearn.pipeline import FeatureUnion
+from sentence_transformers import SentenceTransformer
 from typing import Dict, List
 from urllib.parse import quote
 import numpy as np
@@ -15,6 +18,17 @@ from numpy.typing import NDArray
 import numpy.typing as npt
 import scipy.sparse as sp
 from sklearn.decomposition import PCA
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.decomposition import TruncatedSVD
+from sklearn.pipeline import FeatureUnion, Pipeline
+from sentence_transformers import SentenceTransformer
+from typing import List
+from sklearn.decomposition import TruncatedSVD
+from sklearn.pipeline import FeatureUnion
+from sklearn.base import TransformerMixin
+from sentence_transformers import SentenceTransformer
+from typing import List, Tuple
+
 
 # Create FastAPI app and router
 app = FastAPI()
@@ -123,14 +137,14 @@ class Post(BaseModel):
 
 class PostsRequest(BaseModel):
     posts: List[Post]
-    num_topics: int = 15  # Default number of topics to generate
-    min_cluster_size: int = 5  # Minimum number of posts per topic
-    max_words_per_topic: int = 3  # Number of words to use in topic name
-    similarity_threshold: float = 0.6  # Threshold for considering posts similar (0.0 to 1.0)
-    max_iterations: int = 300  # Maximum iterations for K-means clustering
-    custom_stopwords: List[str] = []  # Domain-specific words to ignore (e.g., ["apple", "twitter"])
-    min_topic_coherence: float = 0.5  # Minimum semantic similarity within topic
-    outlier_threshold: float = 0.3    # Threshold for considering a post as outlier
+    num_topics: int = 15  # Higher = more granular topics, but potentially less coherent
+    min_cluster_size: int = 5  # Minimum posts per topic (smaller = more topics but less reliable)
+    max_words_per_topic: int = 2  # Number of words in topic name (3-5 recommended)
+    similarity_threshold: float = 0.5  # How similar posts must be to stay in same cluster (0.5-0.8 typical)
+    max_iterations: int = 300  # Maximum clustering iterations (higher = better clusters but slower)
+    custom_stopwords: List[str] = ['apple']  # Words to ignore in both clustering and naming
+    min_topic_coherence: float = 0.8  # Required topic similarity (0.7-0.9 recommended)
+    outlier_threshold: float = 0.8  # When to move posts to "Other" (lower = stricter clustering)
     
     # Validate parameters
     @field_validator('num_topics')
@@ -299,24 +313,88 @@ def try_cluster_posts(post_ids: List[str], texts: List[str], embeddings: np.ndar
     
     return final_clusters
 
-def get_ngram_features(texts: List[str], target_dim: int = 384) -> np.ndarray:
+
+def get_ngram_features(
+    texts: List[str], 
+    target_dim: int = 384, 
+    custom_stopwords: List[str] = [], 
+    use_embeddings: bool = False,
+    ngram_weights: Dict[str, float] = {"unigrams": 1.0, "bigrams": 2.0, "trigrams": 3.0},  # Weight control
+) -> np.ndarray:
     """
-    Generate n-gram features to capture word order and normalize dimensions
+    Generate n-gram features with optional word embeddings and dimensionality reduction.
     """
-    # Use both unigrams and bigrams with limited features
-    ngram_vectorizer = TfidfVectorizer(
-        ngram_range=(1, 2),
-        max_features=target_dim,  # Limit to target dimension directly
-        stop_words='english'
-    )
-    ngram_features = ngram_vectorizer.fit_transform(texts)
-    dense_features = np.asarray(ngram_features.todense())
+    all_stopwords = set(ENGLISH_STOP_WORDS).union(custom_stopwords)
+
+    # Define vectorizer pipelines
+    unigram_pipeline = Pipeline([
+        ("vectorizer", TfidfVectorizer(
+            ngram_range=(1, 1), 
+            max_features=target_dim // 3, 
+            stop_words=list(all_stopwords),
+            sublinear_tf=True,
+            min_df=5
+        ))
+    ])
     
-    # If we have fewer features than target_dim, pad with zeros
-    if dense_features.shape[1] < target_dim:
-        padding = np.zeros((dense_features.shape[0], target_dim - dense_features.shape[1]))
-        return np.hstack([dense_features, padding])
-    return dense_features
+    bigram_pipeline = Pipeline([
+        ("vectorizer", TfidfVectorizer(
+            ngram_range=(2, 2), 
+            max_features=target_dim // 3, 
+            stop_words=list(all_stopwords),
+            sublinear_tf=True,
+            min_df=2
+        ))
+    ])
+
+    trigram_pipeline = Pipeline([
+        ("vectorizer", TfidfVectorizer(
+            ngram_range=(3, 3), 
+            max_features=target_dim // 3, 
+            stop_words=list(all_stopwords),
+            sublinear_tf=True,
+            min_df=2
+        ))
+    ])
+    
+    # Feature extraction pipeline
+    vectorizer = FeatureUnion([
+        ("unigrams", unigram_pipeline),
+        ("bigrams", bigram_pipeline),
+        ("trigrams", trigram_pipeline),
+    ])
+    
+    tfidf_features = vectorizer.fit_transform(texts)  # Typically returns a sparse matrix
+
+    # Ensure proper conversion to dense NumPy array
+    #if hasattr(tfidf_features, "toarray"):  
+    tfidf_features = tfidf_features.toarray()
+
+    # Apply Truncated SVD for dimensionality reduction
+    svd = TruncatedSVD(n_components=min(target_dim, tfidf_features.shape[1] - 1))
+    reduced_features = svd.fit_transform(tfidf_features)
+    
+    # Normalize the feature vectors
+    norms = np.linalg.norm(reduced_features, axis=1, keepdims=True) + 1e-8
+    normalized_features = reduced_features / norms
+
+    print(f"Final n-gram features shape: {normalized_features.shape}")
+
+    # Optional: Replace with Sentence Transformers embeddings
+    if use_embeddings:
+        model = SentenceTransformer("all-MiniLM-L6-v2")  # Lightweight transformer model
+        embedding_features = np.array(model.encode(texts, normalize_embeddings=True))
+        return embedding_features[:, :target_dim]  # Trim if too large
+
+    # Ensure the n-gram features have the same shape as the target dimension
+    if normalized_features.shape[1] < target_dim:
+        padding = np.zeros((normalized_features.shape[0], target_dim - normalized_features.shape[1]))
+        normalized_features = np.hstack((normalized_features, padding))
+    elif normalized_features.shape[1] > target_dim:
+        normalized_features = normalized_features[:, :target_dim]
+
+    return normalized_features[:, :target_dim]  # Trim if needed
+
 
 def combine_embeddings(semantic_emb: np.ndarray, ngram_emb: np.ndarray, 
                       alpha: float = 0.7) -> np.ndarray:
@@ -332,60 +410,129 @@ def combine_embeddings(semantic_emb: np.ndarray, ngram_emb: np.ndarray,
     
     return alpha * semantic_norm + (1 - alpha) * ngram_norm
 
-def generate_topic_name(texts: List[str], max_words: int = 5) -> tuple[List[str], List[float]]:
+def generate_topic_name(texts: List[str], max_words: int = 3, custom_stopwords: List[str] = []) -> tuple[List[str], List[float]]:
     """
-    Generate topic name from cluster texts with improved word selection
+    Generate topic name with enhanced phrase detection
     """
+    all_stopwords = set(ENGLISH_STOP_WORDS).union(custom_stopwords)
+    
     vectorizer = TfidfVectorizer(
-        max_features=max_words * 3,
-        stop_words='english',
-        ngram_range=(1, 2)
+        max_features=100,
+        stop_words=list(all_stopwords),
+        ngram_range=(1, 3),
+        min_df=0.1,  # Lower min_df to include more terms
+        max_df=0.9  # Higher max_df to include more terms
     )
     
+    # Get TF-IDF matrix and convert to numpy array properly
     tfidf_matrix = vectorizer.fit_transform(texts)
-    feature_names = vectorizer.get_feature_names_out()
+    dense_matrix = np.array(tfidf_matrix.todense())
     
-    # Convert sparse matrix to dense and sum across documents
-    tfidf_sums = np.asarray(tfidf_matrix.todense()).sum(axis=0).flatten()
+    # Calculate scores using dense array
+    doc_freq = np.sum(dense_matrix > 0, axis=0)
+    tfidf_sum = np.sum(dense_matrix, axis=0)
+    combined_scores = np.multiply(doc_freq, tfidf_sum)
     
-    # Get all candidate words and scores
-    word_scores = [(str(feature_names[i]), float(tfidf_sums[i])) 
-                  for i in range(len(feature_names))]
+    # Get features and create word-score pairs
+    all_features = vectorizer.get_feature_names_out()
+    word_scores = [(str(feature), float(score)) 
+                  for feature, score in zip(all_features, combined_scores)]
+    
+    # Process words and scores
+    word_scores = []
+    seen_parts = set()
+    
+    # Prioritize bigrams and unigrams
+    for idx, feature in enumerate(all_features):
+        if ' ' in feature:  # Bigram
+            parts = feature.split()
+            if not any(part in seen_parts for part in parts):
+                score = float(combined_scores[idx]) * 2.0
+                word_scores.append((feature, score))
+                seen_parts.update(parts)
+        else:  # Unigram
+            if feature not in seen_parts:
+                word_scores.append((feature, float(combined_scores[idx])))
+    
+    # Sort by score and filter
     word_scores.sort(key=lambda x: x[1], reverse=True)
     
-    # Remove duplicates while preserving order
-    seen_words = set()
     unique_words = []
     unique_scores = []
+    seen_words = set()
     
     for word, score in word_scores:
+        if len(unique_words) >= max_words:
+            break
+            
         parts = word.split()
         if not any(part in seen_words for part in parts):
             unique_words.append(word)
             unique_scores.append(score)
             seen_words.update(parts)
-            
-            if len(unique_words) >= max_words:
-                break
+    
+    # Ensure we return at least one word if available
+    if not unique_words and word_scores:
+        unique_words = [word_scores[0][0]]
+        unique_scores = [word_scores[0][1]]
     
     return unique_words, unique_scores
 
 @app.post("/analyze", response_model=List[TopicResponse])
 async def analyze_posts(request: PostsRequest):
     """
-    Main endpoint for topic analysis of posts with configurable sensitivity:
+    Clusters posts into topics with configurable parameters.
     
-    Parameters for tuning:
-    - num_topics: More topics = finer granularity but possibly smaller clusters
-    - min_cluster_size: Higher value = fewer but more coherent topics
-    - max_words_per_topic: More words = more descriptive but possibly noisier topics
-    - similarity_threshold: Higher value = stricter similarity requirements
-    - max_iterations: More iterations = potentially better clustering but slower
+    Key Parameters:
+    --------------
+    num_topics: int = 15
+        - Controls maximum number of potential topics
+        - Higher values create more specific but possibly noisier topics
+        - Lower values create broader, more general topics
+        - Actual number may be less based on data coherence
     
-    Custom stopwords:
-    - Add domain-specific terms that should be ignored during clustering
-    - Example: ["apple", "iphone"] for Apple-related posts
-    - These words won't be used in topic names or similarity calculations
+    min_cluster_size: int = 5
+        - Minimum number of posts required to form a topic
+        - Too low: Many small, potentially noisy topics
+        - Too high: Forces posts into "Other" category
+        - Should be adjusted based on total post count
+    
+    similarity_threshold: float = 0.6
+        - How similar posts must be to stay in same cluster
+        - 0.5: More permissive clustering, larger topics
+        - 0.7: Stricter clustering, more coherent but fewer topics
+        - 0.8+: Very strict, might move most posts to "Other"
+    
+    max_words_per_topic: int = 3
+        - Number of words used in topic names
+        - More words = more descriptive but potentially noisier
+        - Recommended range: 2-5 words
+    
+    custom_stopwords: List[str] = []
+        - Words to completely ignore in both clustering and naming
+        - Example: ["apple", "iphone"] for Apple-related posts
+        - Applied to both initial clustering and topic naming
+        - Case insensitive
+    
+    min_topic_coherence: float = 0.8
+        - Required semantic similarity within topics
+        - Higher values create more focused topics
+        - Lower values allow more diverse content per topic
+    
+    outlier_threshold: float = 0.5
+        - Threshold for moving posts to "Other"
+        - Lower values create stricter clustering
+        - Higher values keep more posts in main topics
+    
+    Clustering Process:
+    -----------------
+    1. First pass: Uses strict parameters for main topics
+    2. Second pass: Uses relaxed parameters for remaining posts
+    3. Posts not fitting any cluster go to "Other"
+    
+    Returns:
+    --------
+    List[TopicResponse]: List of topics with their posts and names
     """
     # Input validation
     if not request.posts:
@@ -401,7 +548,10 @@ async def analyze_posts(request: PostsRequest):
     
     # Generate both semantic and n-gram embeddings
     semantic_embeddings = model.encode(texts)
-    ngram_embeddings = get_ngram_features(texts)
+    ngram_embeddings = get_ngram_features(
+        texts, 
+        custom_stopwords=request.custom_stopwords
+    )
     
     # Combine embeddings
     embeddings = combine_embeddings(
@@ -432,7 +582,8 @@ async def analyze_posts(request: PostsRequest):
             # Process cluster and generate topic
             top_words, top_scores = generate_topic_name(
                 cluster['texts'], 
-                max_words=request.max_words_per_topic
+                max_words=request.max_words_per_topic,
+                custom_stopwords=request.custom_stopwords  # Add this parameter
             )
             
             display_name, canonical_key = normalize_topic_name(top_words, top_scores)
@@ -449,11 +600,9 @@ async def analyze_posts(request: PostsRequest):
         remaining_count = len(remaining_indices)
         print(f"Second pass clustering of {remaining_count} uncategorized posts...")
         
-        # Adjust minimum cluster size based on remaining posts
-        adjusted_min_size = max(
-            request.min_cluster_size,  # Never go below original minimum
-            remaining_count // 10  # Try to create at most 10 secondary clusters
-        )
+        # Adjust parameters for second pass
+        adjusted_min_size = max(3, request.min_cluster_size // 2)  # More aggressive size reduction
+        relaxed_threshold = request.similarity_threshold * 0.7  # More aggressive threshold reduction
         
         remaining_embeddings = embeddings[remaining_indices]
         remaining_texts = [texts[i] for i in remaining_indices]
@@ -463,7 +612,7 @@ async def analyze_posts(request: PostsRequest):
             post_ids=remaining_ids,
             texts=remaining_texts,
             embeddings=remaining_embeddings,
-            similarity_threshold=request.similarity_threshold * 0.8,  # Slightly relaxed
+            similarity_threshold=relaxed_threshold,  # Use relaxed threshold
             min_cluster_size=adjusted_min_size,  # Use adjusted minimum
             max_iterations=request.max_iterations  # Pass max_iterations
         )
@@ -474,19 +623,14 @@ async def analyze_posts(request: PostsRequest):
                 if label == 'other' or len(cluster['texts']) < adjusted_min_size:
                     # Move to global 'other' topic
                     merged_clusters["other"]['texts'].extend(cluster['texts'])
-                    merged_clusters["other"]['ids'].extend(cluster['ids'])
-                    if label == 'other':
-                        topic_name = "other"
-                        if cluster['texts']:
-                            # Generate topic name for 'other' cluster
-                            top_words, _ = generate_topic_name(cluster['texts'], max_words=3)
-                            topic_name = "other: " + " ".join(top_words)
-                        merged_clusters["other"]['display_name'] = topic_name
+                    merged_clusters['other']['ids'].extend(cluster['ids'])
+                    merged_clusters['other']['display_name'] = "Other"  # Simple name for other cluster
                 else:
                     # Create secondary topic
                     top_words, top_scores = generate_topic_name(
                         cluster['texts'], 
-                        max_words=request.max_words_per_topic
+                        max_words=request.max_words_per_topic,
+                        custom_stopwords=request.custom_stopwords  # Add this parameter
                     )
                     display_name, canonical_key = normalize_topic_name(top_words, top_scores)
                     canonical_key = f"secondary_{canonical_key}"
