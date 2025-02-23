@@ -1,3 +1,4 @@
+from multiprocessing import process
 from fastapi import FastAPI, APIRouter, HTTPException
 from pydantic import BaseModel, field_validator
 from sentence_transformers import SentenceTransformer
@@ -28,6 +29,9 @@ from sklearn.pipeline import FeatureUnion
 from sklearn.base import TransformerMixin
 from sentence_transformers import SentenceTransformer
 from typing import List, Tuple
+from mistralai import Mistral
+import json
+
 
 
 # Create FastAPI app and router
@@ -56,6 +60,8 @@ async def test_endpoint() -> Dict[str, str]:
     Basic test endpoint
     """
     return {"message": "API is working"}
+
+
 
 @router.get("/tweets")
 async def get_items() -> List[Dict[str, str]]:
@@ -417,73 +423,96 @@ def combine_embeddings(semantic_emb: np.ndarray, ngram_emb: np.ndarray,
     
     return alpha * semantic_norm + (1 - alpha) * ngram_norm
 
-def generate_topic_name(texts: List[str], max_words: int = 3, custom_stopwords: List[str] = []) -> tuple[List[str], List[float]]:
-    """
-    Generate topic name with enhanced phrase detection
-    """
-    all_stopwords = set(ENGLISH_STOP_WORDS).union(custom_stopwords)
-    
-    vectorizer = TfidfVectorizer(
-        max_features=100,
-        stop_words=list(all_stopwords),
-        ngram_range=(1, 3),
-        min_df=0.1,  # Lower min_df to include more terms
-        max_df=0.9  # Higher max_df to include more terms
+
+
+
+def sent_mistral_prompt(prompt: str):
+    api_key = os.environ["MISTRAL_API_KEY"]
+    model = "mistral-large-latest"
+
+    client = Mistral(api_key=api_key)
+
+    chat_response = client.chat.complete(
+        model=model,
+        messages=[
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ]
     )
+
+    if chat_response.choices:
+        print(chat_response.choices[0].message.content)
+        return chat_response.choices[0].message.content
+    else:
+        print("No response from Mistral API")
+        return ""
+
+def generate_topic_names(clusters: Dict[str, Dict[str, List[str]]], max_words: int = 3) -> Dict[str, str]:
+    """
+    Generate topic names for all clusters using a single Mistral request.
+    """
+    # Prepare the combined request payload
+    request_payload = []
+    for topic_id, cluster in clusters.items():
+        combined_text = " ".join(cluster['texts'][:10])
+        request_payload.append({"topic_id": str(topic_id), "combined_text": combined_text})
     
-    # Get TF-IDF matrix and convert to numpy array properly
-    tfidf_matrix = vectorizer.fit_transform(texts)
-    dense_matrix = np.array(tfidf_matrix.todense())
+    # Send request to Mistral
+    response = sent_mistral_prompt(f"""
+        You receive an array of objects. Each object contains a topic_id and a combined_text.
+        Your task is to generate a name for each topic based on the combined_text.
+        Please use the following guidelines:
+        1. The name should be descriptive and concise.
+        2. The name should be 3-5 words long.
+        3. The name should be relevant to the combined_text.
+        4. When choosing summary words, consider the most frequent and important terms such as
+           brand names, unique words, person names, or geographical locations.
+        5. Try your best to identify one key term that represents the topic
+        6. Words should have logical order
+        Here is the request payload:
+        <request_payload>
+        {request_payload}
+        </request_payload>
+
+        Response format should be in JSON. Example:
+        <response_example>
+        [
+            {{\"topic_id\": \"1\", \"topic_name\": \"Apple iPhone 13\"}},
+            {{\"topic_id\": \"2\", \"topic_name\": \"Tesla Electric Vehicles\"}},
+            {{\"topic_id\": \"3\", \"topic_name\": \"SpaceX Mars Missions\"}}
+        ]
+        </response_example>
+        
+        Please DON'T include anything in the response other than a valid JSON code.
+        Follow the response example format precisely. 
+        Do not include backticks.
+    """)
+
+    print(f"\n\nMistral response: {response}\n\n")
+
+    # Parse the response
+    topic_names = {}
+
+    ## add fallback names
+    for topic_id in clusters.keys():
+        topic_names[str(topic_id)] = f"Topic {topic_id}"
+
+    if response:
+        try:
+            response_data = json.loads(response)  # Parse JSON response
+            if isinstance(response_data, list):
+                for item in response_data:
+                    if isinstance(item, dict):
+                        topic_id = item.get("topic_id")
+                        topic_name = item.get("topic_name")
+                        if topic_id and topic_name:
+                            topic_names[str(topic_id)] = topic_name
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"Error parsing response: {e}")
     
-    # Calculate scores using dense array
-    doc_freq = np.sum(dense_matrix > 0, axis=0)
-    tfidf_sum = np.sum(dense_matrix, axis=0)
-    combined_scores = np.multiply(doc_freq, tfidf_sum)
-    
-    # Get features and create word-score pairs
-    all_features = vectorizer.get_feature_names_out()
-    word_scores = [(str(feature), float(score)) 
-                  for feature, score in zip(all_features, combined_scores)]
-    
-    # Process words and scores
-    word_scores = []
-    seen_parts = set()
-    
-    # Prioritize bigrams and unigrams
-    for idx, feature in enumerate(all_features):
-        if ' ' in feature:  # Bigram
-            parts = feature.split()
-            if not any(part in seen_parts for part in parts):
-                score = float(combined_scores[idx]) * 2.0
-                word_scores.append((feature, score))
-                seen_parts.update(parts)
-        else:  # Unigram
-            if feature not in seen_parts:
-                word_scores.append((feature, float(combined_scores[idx])))
-    
-    # Sort by score and filter
-    word_scores.sort(key=lambda x: x[1], reverse=True)
-    
-    unique_words = []
-    unique_scores = []
-    seen_words = set()
-    
-    for word, score in word_scores:
-        if len(unique_words) >= max_words:
-            break
-            
-        parts = word.split()
-        if not any(part in seen_words for part in parts):
-            unique_words.append(word)
-            unique_scores.append(score)
-            seen_words.update(parts)
-    
-    # Ensure we return at least one word if available
-    if not unique_words and word_scores:
-        unique_words = [word_scores[0][0]]
-        unique_scores = [word_scores[0][1]]
-    
-    return unique_words, unique_scores
+    return topic_names
 
 @app.post("/analyze", response_model=List[TopicResponse])
 async def analyze_posts(request: PostsRequest):
@@ -564,7 +593,7 @@ async def analyze_posts(request: PostsRequest):
     embeddings = combine_embeddings(
         semantic_embeddings, 
         ngram_embeddings,
-        alpha=0.7  # Adjust this to control importance of word order
+        alpha=1  # Adjust this to control importance of word order
     )
 
     # First pass: Try with original parameters
@@ -586,19 +615,7 @@ async def analyze_posts(request: PostsRequest):
     for label, cluster in main_clusters.items():
         if (label != 'other' and 
             len(cluster['texts']) >= request.min_cluster_size):  # Strict size check
-            # Process cluster and generate topic
-            top_words, top_scores = generate_topic_name(
-                cluster['texts'], 
-                max_words=request.max_words_per_topic,
-                custom_stopwords=request.custom_stopwords  # Add this parameter
-            )
-            
-            display_name, canonical_key = normalize_topic_name(top_words, top_scores)
-            
-            merged_clusters[canonical_key]['texts'].extend(cluster['texts'])
-            merged_clusters[canonical_key]['ids'].extend(cluster['ids'])
-            merged_clusters[canonical_key]['display_name'] = display_name
-            
+            merged_clusters[label] = cluster
             categorized_posts.update(cluster['ids'])
 
     # Second pass: Try to cluster remaining posts with lower threshold
@@ -633,28 +650,25 @@ async def analyze_posts(request: PostsRequest):
                     merged_clusters['other']['ids'].extend(cluster['ids'])
                     merged_clusters['other']['display_name'] = "Other"  # Simple name for other cluster
                 else:
-                    # Create secondary topic
-                    top_words, top_scores = generate_topic_name(
-                        cluster['texts'], 
-                        max_words=request.max_words_per_topic,
-                        custom_stopwords=request.custom_stopwords  # Add this parameter
-                    )
-                    display_name, canonical_key = normalize_topic_name(top_words, top_scores)
-                    canonical_key = f"secondary_{canonical_key}"
-                    
-                    merged_clusters[canonical_key]['texts'].extend(cluster['texts'])
-                    merged_clusters[canonical_key]['ids'].extend(cluster['ids'])
-                    merged_clusters[canonical_key]['display_name'] = display_name
+                    merged_clusters[label] = cluster
 
     print(f"Final distribution: {sum(len(c['ids']) for c in merged_clusters.values())} posts in {len(merged_clusters)} topics")
+
+    # Generate topic names for all clusters
+    topic_names = generate_topic_names(merged_clusters, max_words=request.max_words_per_topic)
+
+    # Assign topic names to clusters
+    for canonical_key, cluster in merged_clusters.items():
+        if canonical_key in topic_names:
+            cluster['display_name'] = topic_names[canonical_key]
 
     # Generate response
     response = [
         TopicResponse(
-            name=cluster['display_name'] or canonical_key,  # Fallback to canonical key if no display name
+            name=cluster.get('display_name', '') or topic_names.get(str(canonical_key), str(canonical_key)),  # Ensure canonical_key is a string
             id=f"topic_{i+1}",
             postIds=cluster['ids'],
-            canonical_key=canonical_key
+            canonical_key=str(canonical_key)  # Ensure canonical_key is a string
         )
         for i, (canonical_key, cluster) in enumerate(merged_clusters.items())
     ]
