@@ -1,13 +1,11 @@
-from multiprocessing import process
 from fastapi import FastAPI, APIRouter, HTTPException
 from pydantic import BaseModel, field_validator
 from sentence_transformers import SentenceTransformer
 from sklearn.cluster import KMeans
 from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
 from sklearn.decomposition import TruncatedSVD
-from sklearn.pipeline import FeatureUnion
-from sentence_transformers import SentenceTransformer
-from typing import Dict, List
+from sklearn.pipeline import FeatureUnion, Pipeline
+from typing import Dict, List, Tuple
 from urllib.parse import quote
 import numpy as np
 import os
@@ -16,19 +14,9 @@ import requests
 from dotenv import load_dotenv
 from collections import defaultdict
 from numpy.typing import NDArray
-import numpy.typing as npt
 import scipy.sparse as sp
 from sklearn.decomposition import PCA
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.decomposition import TruncatedSVD
-from sklearn.pipeline import FeatureUnion, Pipeline
-from sentence_transformers import SentenceTransformer
-from typing import List
-from sklearn.decomposition import TruncatedSVD
-from sklearn.pipeline import FeatureUnion
 from sklearn.base import TransformerMixin
-from sentence_transformers import SentenceTransformer
-from typing import List, Tuple
 from mistralai import Mistral
 import json
 
@@ -54,12 +42,7 @@ load_dotenv()  # Load environment variables from .env file
 # Include router BEFORE any @app decorators
 app.include_router(router)  # Remove the prefix to match original endpoint paths
 
-@router.get("/test")
-async def test_endpoint() -> Dict[str, str]:
-    """
-    Basic test endpoint
-    """
-    return {"message": "API is working"}
+
 
 
 
