@@ -35,12 +35,18 @@ python-backend-api
    cd python-backend-api
    ```
 
-2. Install dependencies:
+2. Create a virtual environment:
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows use: venv\Scripts\activate
+   ```
+
+3. Install dependencies:
    ```
    pip install -r requirements.txt
    ```
 
-3. Run the application:
+4. Run the application:
    ```
    uvicorn src.main:app --reload
    ```
