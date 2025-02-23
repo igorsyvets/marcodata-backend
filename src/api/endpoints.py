@@ -313,78 +313,86 @@ def try_cluster_posts(post_ids: List[str], texts: List[str], embeddings: np.ndar
     
     return final_clusters
 
-
 def get_ngram_features(
     texts: List[str], 
     target_dim: int = 384, 
-    custom_stopwords: List[str] = [], 
-    use_embeddings: bool = False,
-    ngram_weights: Dict[str, float] = {"unigrams": 1.0, "bigrams": 2.0, "trigrams": 3.0},  # Weight control
+    custom_stopwords: List[str] = [],
+    ngram_weights: Dict[str, float] = {"unigrams": 1, "bigrams": 1, "trigrams": 1},  # Weight control
 ) -> np.ndarray:
     """
-    Generate n-gram features with optional word embeddings and dimensionality reduction.
+    Generate weighted n-gram features with dimensionality reduction.
+
+    Parameters:
+    - texts: List of text samples.
+    - target_dim: Feature vector size.
+    - custom_stopwords: Additional stopwords.
+    - ngram_weights: Dict specifying importance of unigrams, bigrams, trigrams.
     """
     all_stopwords = set(ENGLISH_STOP_WORDS).union(custom_stopwords)
 
-    # Define vectorizer pipelines
+    # Define n-gram vectorizers with independent pipelines
     unigram_pipeline = Pipeline([
         ("vectorizer", TfidfVectorizer(
-            ngram_range=(1, 1), 
-            max_features=target_dim // 3, 
+            ngram_range=(1, 1),
+            max_features=target_dim // 3,
             stop_words=list(all_stopwords),
             sublinear_tf=True,
             min_df=5
         ))
     ])
-    
+
     bigram_pipeline = Pipeline([
         ("vectorizer", TfidfVectorizer(
-            ngram_range=(2, 2), 
-            max_features=target_dim // 3, 
+            ngram_range=(2, 2),
+            max_features=target_dim // 3,
+            stop_words=list(all_stopwords),
+            sublinear_tf=True,
+            min_df=5
+        ))
+    ])
+
+    trigram_pipeline = Pipeline([
+        ("vectorizer", TfidfVectorizer(
+            ngram_range=(3, 3),
+            max_features=target_dim // 3,
             stop_words=list(all_stopwords),
             sublinear_tf=True,
             min_df=2
         ))
     ])
 
-    trigram_pipeline = Pipeline([
-        ("vectorizer", TfidfVectorizer(
-            ngram_range=(3, 3), 
-            max_features=target_dim // 3, 
-            stop_words=list(all_stopwords),
-            sublinear_tf=True,
-            min_df=2
-        ))
-    ])
-    
     # Feature extraction pipeline
     vectorizer = FeatureUnion([
         ("unigrams", unigram_pipeline),
         ("bigrams", bigram_pipeline),
         ("trigrams", trigram_pipeline),
     ])
-    
-    tfidf_features = vectorizer.fit_transform(texts)  # Typically returns a sparse matrix
 
-    # Ensure proper conversion to dense NumPy array
-    #if hasattr(tfidf_features, "toarray"):  
+    # Extract raw TF-IDF features
+    tfidf_features = vectorizer.fit_transform(texts)
+
+    # Convert to NumPy array if needed
     tfidf_features = tfidf_features.toarray()
 
-    # Apply Truncated SVD for dimensionality reduction
+    # Apply individual n-gram importance weights
+    num_features = tfidf_features.shape[1]
+    num_sections = num_features // 3
+
+    unigram_weight = ngram_weights.get("unigrams", 1.0)
+    bigram_weight = ngram_weights.get("bigrams", 1.5)
+    trigram_weight = ngram_weights.get("trigrams", 2.0)
+
+    tfidf_features[:, :num_sections] *= unigram_weight
+    tfidf_features[:, num_sections:2*num_sections] *= bigram_weight
+    tfidf_features[:, 2*num_sections:] *= trigram_weight
+
+    # Apply SVD for dimensionality reduction
     svd = TruncatedSVD(n_components=min(target_dim, tfidf_features.shape[1] - 1))
     reduced_features = svd.fit_transform(tfidf_features)
-    
-    # Normalize the feature vectors
+
+    # Normalize final feature vector
     norms = np.linalg.norm(reduced_features, axis=1, keepdims=True) + 1e-8
     normalized_features = reduced_features / norms
-
-    print(f"Final n-gram features shape: {normalized_features.shape}")
-
-    # Optional: Replace with Sentence Transformers embeddings
-    if use_embeddings:
-        model = SentenceTransformer("all-MiniLM-L6-v2")  # Lightweight transformer model
-        embedding_features = np.array(model.encode(texts, normalize_embeddings=True))
-        return embedding_features[:, :target_dim]  # Trim if too large
 
     # Ensure the n-gram features have the same shape as the target dimension
     if normalized_features.shape[1] < target_dim:
@@ -394,7 +402,6 @@ def get_ngram_features(
         normalized_features = normalized_features[:, :target_dim]
 
     return normalized_features[:, :target_dim]  # Trim if needed
-
 
 def combine_embeddings(semantic_emb: np.ndarray, ngram_emb: np.ndarray, 
                       alpha: float = 0.7) -> np.ndarray:
