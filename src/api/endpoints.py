@@ -468,9 +468,9 @@ def generate_topic_names(clusters: Dict[str, Dict[str, List[str]]], max_words: i
         Response format should be in JSON. Example:
         <response_example>
         [
-            {{\"topic_id\": \"1\", \"topic_name\": \"Apple iPhone 13\"}},
-            {{\"topic_id\": \"2\", \"topic_name\": \"Tesla Electric Vehicles\"}},
-            {{\"topic_id\": \"3\", \"topic_name\": \"SpaceX Mars Missions\"}}
+            {{\"topic_id\": \"1\", \"topic_name\": string}},
+            {{\"topic_id\": \"2\", \"topic_name\": string}},
+            {{\"topic_id\": \"3\", \"topic_name\": string}}
         ]
         </response_example>
         
@@ -688,9 +688,9 @@ async def analyze_posts(request: PostsRequest):
     7. Response format should be in JSON.
     <response-example>
     {{
-        "title": "Apple iPhone 13", 
-        "summary": "The latest iPhone model with improved features.",
-        "report_summary": "{greeting}, sir. Congratulations on the successful launch of the new iPhone 13."
+        "title":string, 
+        "summary": string,
+        "report_summary": "{greeting}, sir. Congratulations on ..."
        }}
     </response-example>
     Combined text: 
