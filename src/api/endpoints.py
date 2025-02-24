@@ -1,3 +1,5 @@
+import datetime
+from anyio import current_time
 from fastapi import FastAPI, APIRouter, HTTPException
 from pydantic import BaseModel, field_validator
 from sentence_transformers import SentenceTransformer
@@ -131,7 +133,7 @@ class PostsRequest(BaseModel):
     max_words_per_topic: int = 2  # Number of words in topic name (3-5 recommended)
     similarity_threshold: float = 0.5  # How similar posts must be to stay in same cluster (0.5-0.8 typical)
     max_iterations: int = 300  # Maximum clustering iterations (higher = better clusters but slower)
-    custom_stopwords: List[str] = ['apple']  # Words to ignore in both clustering and naming
+    custom_stopwords: List[str] = []  # Words to ignore in both clustering and naming
     min_topic_coherence: float = 0.8  # Required topic similarity (0.7-0.9 recommended)
     outlier_threshold: float = 0.8  # When to move posts to "Other" (lower = stricter clustering)
     
@@ -457,6 +459,7 @@ def generate_topic_names(clusters: Dict[str, Dict[str, List[str]]], max_words: i
         5. Prefer high-signal words to generic words
         6. Try your best to identify one key term that represents the topic
         7. Words should have logical order. Use commas as needed
+        8. Do not include any evaluative adjectives
         Here is the request payload:
         <request_payload>
         {request_payload}
@@ -487,7 +490,7 @@ def generate_topic_names(clusters: Dict[str, Dict[str, List[str]]], max_words: i
 
     if response:
         try:
-            response_data = json.loads(response)  # Parse JSON response
+            response_data = json.loads(str(response))  # Parse JSON response
             if isinstance(response_data, list):
                 for item in response_data:
                     if isinstance(item, dict):
@@ -500,7 +503,7 @@ def generate_topic_names(clusters: Dict[str, Dict[str, List[str]]], max_words: i
     
     return topic_names
 
-@app.post("/analyze", response_model=List[TopicResponse])
+@app.post("/analyze", response_model=Dict[str, object])
 async def analyze_posts(request: PostsRequest):
     """
     Clusters posts into topics with configurable parameters.
@@ -652,12 +655,67 @@ async def analyze_posts(request: PostsRequest):
     # Generate response
     response = [
         TopicResponse(
-            name=cluster.get('display_name', '') or topic_names.get(str(canonical_key), str(canonical_key)),  # Ensure canonical_key is a string
-            id=cluster.get('id', str(canonical_key)),  # Ensure canonical_key is a string
-            postIds=cluster['ids'],  # Ensure original ids are used
-            canonical_key=str(canonical_key)  # Ensure canonical_key is a string
+            name=cluster.get('display_name', '') or topic_names.get(str(canonical_key), str(canonical_key)),
+            id=cluster.get('id', str(canonical_key)),
+            postIds=cluster['ids'],
+            canonical_key=str(canonical_key)
         )
         for i, (canonical_key, cluster) in enumerate(merged_clusters.items())
     ]
 
-    return response
+    # New step: Combine posts from top 3 clusters and generate title and summary
+    top_clusters = sorted(merged_clusters.values(), key=lambda c: len(c['ids']), reverse=True)[:3]
+    combined_text = " ".join(post for cluster in top_clusters for post in cluster['texts'])
+
+    current_time_of_day = datetime.datetime.now().hour
+    greeting = "Good morning"
+    if current_time_of_day >= 12 and current_time_of_day < 18:
+        greeting = "Good afternoon"
+    elif current_time_of_day >= 18:
+        greeting = "Good evening"
+
+
+    mistral_prompt = f"""
+    You receive a combined text from top 3 clusters. Your task is to generate a title and a short summary.
+    Guidelines:
+    1. The title should be concise and descriptive. Try including high-signal words such as brand names, sentiment, or key terms.
+    2. The summary should be 3-5 sentences long.
+    3. Both should be relevant to the combined text.
+    4. Include line breaks between sentences <br> for readability.
+    5. Do not include any evaluative adjectives in title or summary.
+    6. Add a more personalized summary to report_summary field. Include a greeting and congratulations, and perhaps a joke. 
+        At the end, something like "that's all i got for today" or "the report is now over" and wish them a good day.
+    7. Response format should be in JSON.
+    <response-example>
+    {{
+        "title": "Apple iPhone 13", 
+        "summary": "The latest iPhone model with improved features.",
+        "report_summary": "{greeting}, sir. Congratulations on the successful launch of the new iPhone 13."
+       }}
+    </response-example>
+    Combined text: 
+    <combined-text>
+    {combined_text}
+    </combined-text>    
+    Please DON'T include anything in the response other than a valid JSON code.
+    Follow the response example format precisely. 
+    Do not include backticks.
+    """
+
+    mistral_response = sent_mistral_prompt(mistral_prompt)
+    print('Mistral response:', mistral_response)
+    trending_narratives = {"title": "", "summary": ""}
+    
+    if isinstance(mistral_response, str):
+        try:
+            response_data = json.loads(str(mistral_response))  # Ensure the response is a string
+            trending_narratives["title"] = response_data.get("title", "")
+            trending_narratives["summary"] = response_data.get("summary", "")
+            trending_narratives["report_summary"] = response_data.get("report_summary", "")
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"Error parsing Mistral response: {e}")
+
+    return {
+        "trending_narratives": trending_narratives,
+        "trending_topics": response
+    }
